@@ -15,16 +15,26 @@ Println()
 cfping() {
   cfping:help() {
     cat << EOF 1>&2
-usage: $_this -c [-l] [-p 2000] [-s 5] [-g 1] [-m 500]
+usage: $_this -c [-l] [-s 2000] [-p 5] [-g 1] [-m 500]
         -c     ping [fping] all cloudflare ips to find the best ip
-        -p <x> sets the time in milliseconds that fping waits between successive 
+        -s <x> set the time in milliseconds that fping waits between successive 
                packets to an individual target (default is 2000, minimum is 10)
-        -s <x> set the number of request packets to send to each target (default is 5)
+        -p <x> set the number of request packets to send to each target (default is 5)
         -g <x> the minimum amount of time (in milliseconds) between sending a 
                ping packet to any target (default is 1, minimum is 1)
         -l     show cloudflare ip location
-        -m     you may want to use this according to system resources limit 
+        -m <x> you may want to use this according to system resources limit 
                larger number faster result (default is 500)
+
+        ---
+
+usage: $_this -d [-L https://domain.com/xxx] [-N 100] [-P 10] [-I ip]
+        -d     speed test (default testing best 100 IPs unless -I used)
+        -L <x> set the file link to test (default is a cloudflare worker linking to a file on www.apple.com)
+               the domain of this link must have cname record on cloudflare
+        -N <x> set the number of IPs to test (default is 100)
+        -P <x> set the parallel number of speed test (default is 10)
+        -I <x> specify an ip to test
 
         ---
 
@@ -121,10 +131,26 @@ EOF
         var="cf"
         args=0
         ;;
-      p)
-        var="period"
+      d)
+        var="st"
+        args=0
+        ;;
+      L)
+        var="st_link"
+        ;;
+      N)
+        var="st_num"
+        ;;
+      P)
+        var="st_parallel"
+        ;;
+      I)
+        var="st_ip"
         ;;
       s)
+        var="mseconds"
+        ;;
+      p)
         var="packets"
         ;;
       g)
@@ -178,10 +204,15 @@ EOF
 
   local _formats=("dec" "dot" "hex")
   local _this="cfping"
-  local _version="0.1.1"
+  local _version="0.1.3"
 
   local cf=0
-  local period=2000
+  local st=0
+  local st_num=100
+  local st_link="https://www-apple-com.mtimer.workers.dev/105/media/us/iphone-11-pro/2019/3bd902e4-0752-4ac1-95f8-6225c32aec6d/films/product/iphone-11-pro-product-tpl-cc-us-2019_1280x720h.mp4"
+  local st_parallel=10
+  local st_ip=""
+  local mseconds=2000
   local packets=5
   local interval=1
   local parallel=500
@@ -193,12 +224,12 @@ EOF
   local start
   local end
 
-  while getopts "f:i:n:t:p:s:g:m:?hvcl" opt; do
+  while getopts "f:i:n:t:p:s:g:m:L:N:P:I:?hvcld" opt; do
     case ${opt} in
-      f | i | n | t | p | s | g | m)
+      f | i | n | t | p | s | g | m | L | N | P | I)
         cfping:set "$opt" "$OPTARG"
         ;;
-      c | l)
+      c | l | d)
         cfping:set "$opt" 1
         ;;
       v)
@@ -257,22 +288,94 @@ EOF
 
     Println "$info pinging cloudflare IPs, 1 min ..."
 
-    if fping -q -i"$interval" -c"$packets" -p"$period" -x1 < ip_checked > ip_result 2>&1 
+    fping -q -i"$interval" -c"$packets" -p"$mseconds" -x1 < ip_checked > ip_result 2>&1 || exit_code=$?
+
+    if [[ ${exit_code:-0} -eq 1 ]] || [[ ${exit_code:-0} -eq 3 ]] || [[ ${exit_code:-0} -eq 4 ]]
     then
-      awk '{split($5,a,"/");split($8,b,"/"); if($8) print $1,"\r\033[18Cpackets received: "a[2],"\033[3Cping: "b[2]| "sort -n -k4,4r -k6,6" }' ip_result > ip_sorted
-      if [[ $location -eq 1 ]] 
+      if [[ $EUID -ne 0 ]] && [[ $interval -lt 10 ]]
       then
-        ip_sorted=$(awk 'FNR==NR{a[$1]=$2;next}{ if($1 in a) print $0,"\r\033[55Clocation: "a[$1]}' ip_location ip_sorted)
-        echo "$ip_sorted" > ip_sorted
+        interval=10
       fi
 
-      best_ips=$(awk 'NR < 11 {print $0}' ip_sorted)
-      Println "$info Best 10 IPs:\n\n$best_ips\n"
-      Println "more IPs in file ip_sorted\n"
-    else
-      Println "$error no ip found, connection problem ?\n"
+      exit_code=0
+      fping -q -i"$interval" -c"$packets" -p"$mseconds" < ip_checked > ip_result 2>&1 || exit_code=$?
+
+      if [[ $exit_code -ne 1 ]] && [[ $exit_code -ne 0 ]]
+      then
+        Println "$error fping error, fping version too old or connection problem ?\n"
+        exit 1
+      fi
     fi
+
+    awk '{split($5,a,"/");split($8,b,"/"); if($8) printf "%s packets received: %s ping: %s\n",$1,a[2],b[2] | "sort -k4,4rn -k6,6n" }' ip_result > ip_sorted
+    if [[ $location -eq 1 ]] 
+    then
+      ip_sorted=$(awk 'NR==FNR{a[$1]=$2;next}{printf "%s location: %s\n",$0,a[$1]}' ip_location ip_sorted)
+      echo "$ip_sorted" > ip_sorted
+      best_ips=$(awk 'NR < 11 {printf "%s\r\033[18Cpackets received: %s\033[3Cping: %s\033[3Clocation: %s\n",$1,$4,$6,$8}' ip_sorted)
+    else
+      best_ips=$(awk 'NR < 11 {printf "%s\r\033[18Cpackets received: %s\033[3Cping: %s\n",$1,$4,$6}' ip_sorted)
+    fi
+    Println "$info 10 BEST IPs:\n\n$best_ips\n\nmore IPs in file ip_sorted\n"
+
     # echo -ne "$ips" | xargs -I {} -P"$parallel" sh -c "ping -c${packets} -q -W2 '{}' > '{}'.out 2>&1"
+  elif [[ $st -eq 1 ]] 
+  then
+    if [ ! -s "ip_sorted" ] 
+    then
+      Println "$error no IPs found, run $_this -c\n"
+      exit 1
+    fi
+    if [[ ${st_link:0:5} == "https" ]] 
+    then
+      st_port=443
+    else
+      st_port=80
+    fi
+    st_domain=${st_link#*http://}
+    st_domain=${st_domain%%/*}
+    st_domain=${st_domain%:*}
+    if cfping:isip "$st_domain" 
+    then
+      Println "$error wrong file link, use domain\n"
+      exit 1
+    fi
+    if [ -n "$st_ip" ] 
+    then
+      Println "$info testing IP $st_ip ..."
+      curl --resolve "$st_domain:$st_port:$st_ip" "$st_link" -o "$st_ip" -s --connect-timeout 2 --max-time 10 || true
+      if [ ! -s "$st_ip" ]
+      then
+        Println "$error the domain of the file link must have cname record on cloudflare or try again\n"
+        exit 1
+      fi
+      if [[ $(uname) == "Darwin" ]] 
+      then
+        stat -f '%N %z' $st_ip | awk '{printf "\n%s\r\033[18Cspeed: %.2f MB/10s\n\n",$1,$2/1024/1024}'
+      else
+        find $st_ip -type f -printf '%p %s\n' | awk '{printf "\n%s\r\033[18Cspeed: %.2f MB/10s\n\n",$1,$2/1024/1024}'
+      fi
+      rm -f ${st_ip:-notfound}
+      exit 0
+    fi
+    Println "$info speed testing, 2 mins ...\n"
+    mkdir -p cf_speed_test
+    awk 'NR <= '"$st_num"' {print $1}' ip_sorted | xargs -L1 -P"$st_parallel" sh -c 'curl --resolve '"$st_domain:$st_port"':$0 "'"$st_link"'" -o cf_speed_test/$0 -s --connect-timeout 2 --max-time 10 || true'
+    cd cf_speed_test
+    if [[ $(uname) == "Darwin" ]] 
+    then
+      ip_speed_test=$(find -- * -type f -print0 | xargs -0 stat -f '%N %z' | sort -k2,2rn | awk '{printf "%s %.2f MB\n",$1,$2/1024/1024}')
+      # rm -- *
+    else
+      ip_speed_test=$(find -- * -type f -printf '%p %s\n' | sort -k2,2rn | awk '{printf "%s %.2f MB\n",$1,$2/1024/1024}')
+    fi
+    cd ..
+    rm -rf cf_speed_test
+    echo "$ip_speed_test" > ip_speed_test
+    ip_speed_test=$(awk 'NR==FNR{a[$1]=$0;next}{printf "%s speed: %s MB/10s\n",a[$1],$2}' ip_sorted ip_speed_test)
+    echo "$ip_speed_test" > ip_speed_test
+    awk '{if($10) printf "%s\r\033[18Cpackets received: %s\033[3Cping: %s\033[3Clocation: %s\033[3Cspeed: %s MB/10s\n",$1,$4,$6,$8,$10; else printf "%s\r\033[18Cpackets received: %s\033[3Cping: %s\033[3Cspeed: %s MB/10s\n",$1,$4,$6,$8}' ip_speed_test
+    Println "$info Done.\n"
   else
     cfping:printip "$@"
   fi
